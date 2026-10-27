@@ -53,20 +53,25 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.style.ForegroundColorSpan;
 import android.util.TypedValue;
+import android.transition.AutoTransition;
+import android.transition.TransitionManager;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.SoundEffectConstants;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.animation.AnimationUtils;
+import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LayoutAnimationController;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.RelativeLayout;
 import android.widget.PopupWindow;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -176,7 +181,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean advancedEffects;
     private TextView greeting;
     private View clockBlock;
-    private View btnInputs;
+    private TextView btnInputs;
     /** config show_inputs_pill: false keeps the Inputs pill hidden even when the TV has inputs. */
     private boolean showInputsPill = true;
     private TextView btnWifi;
@@ -270,6 +275,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private int packageSequence;
     /** The Inputs or Module cards dropdown while one is open, so onPause can close it. */
     private PopupWindow openPopup;
+    private TextView btnSettings;
+    private String currentWifiSsid = "";
+    private final Handler sysMonitorHandler = new Handler(Looper.getMainLooper());
+    private int sysMonitorMode = 0; // 0=RAM, 1=Storage, 2=CPU
+    private Runnable sysMonitorRunnable;
     /** Reorder mode is on (top-bar button). */
     private boolean reordering;
     /** Key of the tile being carried in reorder mode, or null. */
@@ -707,28 +717,39 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
 
         btnInputs = findViewById(R.id.btnInputs);
-        View btnSettings = findViewById(R.id.btnSettings);
-        btnInputs.setOnClickListener(v -> showInputs());
-        btnWifi.setOnClickListener(v -> openNetworkPill());
-        btnVpn.setOnClickListener(v -> openVpnPill());
-        btnWifi.setOnLongClickListener(v -> {
-            open(systemIntent(Settings.ACTION_WIFI_SETTINGS));
-            return true;
-        });
-        launcherSettingsButton = cfg.launcherSettingsButton;
-        if (launcherSettingsButton) {
-            ((TextView) btnSettings).setText(R.string.launcher_settings);
-            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_home_settings_pill, 0, 0, 0);
+        btnWifi = findViewById(R.id.btnWifi);
+        btnSettings = findViewById(R.id.btnSettings);
+
+        setupExpandablePill(btnWifi, () -> !TextUtils.isEmpty(currentWifiSsid) ? currentWifiSsid : getString(R.string.wifi));
+        setupExpandablePill(btnSettings, () -> getString(launcherSettingsButton ? R.string.launcher_settings : R.string.settings));
+
+        if (btnInputs != null) {
+            btnInputs.setOnClickListener(v -> cycleNextMetric());
+            btnInputs.setOnLongClickListener(v -> { showInputs(); return true; });
         }
-        btnSettings.setOnClickListener(v -> {
-            if (launcherSettingsButton) startActivityForResult(
-                    new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
-            else open(systemIntent(Settings.ACTION_SETTINGS));
-        });
+        if (btnWifi != null) {
+            btnWifi.setOnClickListener(v -> openNetworkPill());
+            btnWifi.setOnLongClickListener(v -> { open(systemIntent(Settings.ACTION_WIFI_SETTINGS)); return true; });
+        }
+        btnVpn.setOnClickListener(v -> openVpnPill());
+
+        launcherSettingsButton = cfg.launcherSettingsButton;
+        if (btnSettings != null) {
+            btnSettings.setOnClickListener(v -> {
+                if (launcherSettingsButton) startActivityForResult(
+                        new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
+                else open(systemIntent(Settings.ACTION_SETTINGS));
+            });
+            btnSettings.setOnLongClickListener(v -> {
+                showSettingsMenu();
+                return true;
+            });
+        }
+
         btnReorder = findViewById(R.id.btnReorder);
         btnReorder.setOnClickListener(v -> toggleReorder());
         btnReorder.setVisibility(cfg.reorderButton ? View.VISIBLE : View.GONE);
-        if (!cfg.showNetworkPill) btnWifi.setVisibility(View.GONE);
+        if (!cfg.showNetworkPill && btnWifi != null) btnWifi.setVisibility(View.GONE);
         showInputsPill = cfg.showInputsPill;
         showInputsMenuRow = cfg.showInputsPill;
         btnLibraryTop = findViewById(R.id.btnLibraryTop);
@@ -740,72 +761,41 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         addTopBarApps(cfg.topBarApps, cfg.launchActions);
         iconOnlyButtons = cfg.iconOnlyButtons;
         topMenu = cfg.topMenu;
-        wifiIconOnly = iconOnlyButtons && cfg.wifiLabelWidth <= 0;
-        if (cfg.wifiStatusColor) {
-            wifiPlainTint = btnWifi.getCompoundDrawableTintList();
-            wifiOnlineTint = getColorStateList(R.color.pill_icon_online);
-            if (cfg.wifiStatusWarnings) {
-                wifiNoInternetTint = getColorStateList(R.color.pill_icon_no_internet);
-                wifiOfflineTint = getColorStateList(R.color.pill_icon_offline);
-            }
-        }
-        if (cfg.topMenu) {
-            // One gear: Inputs and Wi-Fi move into its dropdown. The Wi-Fi pill stays hidden but keeps its
-            // label up to date, which the menu's Wi-Fi row shows.
-            showInputsPill = false;
-            btnInputs.setVisibility(View.GONE);
-            btnWifi.setVisibility(View.GONE);
-            ((TextView) btnSettings).setText(R.string.settings);
-            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_settings, 0, 0, 0);
-            if (!iconOnlyButtons) makeIconOnly((TextView) btnSettings);
-            btnSettings.setOnClickListener(v -> showTopMenu());
-            // The lone gear sits at the header's middle, not on its bottom line like the row of pills.
-            LinearLayout topButtons = findViewById(R.id.topButtons);
-            RelativeLayout.LayoutParams tlp = (RelativeLayout.LayoutParams) topButtons.getLayoutParams();
-            tlp.addRule(RelativeLayout.ALIGN_TOP, R.id.leftBlock);
-            tlp.bottomMargin = 0;
-            topButtons.setLayoutParams(tlp);
-            topButtons.setGravity(Gravity.CENTER_VERTICAL);
-        }
-        if (iconOnlyButtons) {
-            if (cfg.wifiLabelWidth > 0) btnWifi.setMaxWidth(Math.round(cfg.wifiLabelWidth * density));
-            else makeIconOnly(btnWifi);
-            makeIconOnly((TextView) btnSettings);
-        }
-        if (cfg.iconOnlyInputs) makeIconOnly((TextView) btnInputs);
-        btnSettings.setOnLongClickListener(v -> {
-            showSettingsMenu();
-            return true;
-        });
+        wifiIconOnly = false;
 
         // Keep focus on the top bar at its ends and at the top: Android's focus finder would otherwise
         // jump to a tile far below when there is nothing in that direction.
         boolean rtlMenuBar = getResources().getBoolean(R.bool.rtl_menu_bar);
         View.OnKeyListener pillKeys = (v, keyCode, event) -> {
             if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+            if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+                v.performClick();
+                return true;
+            }
             if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
             if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
                 // Back to the dock tile Up came from, not wherever the focus finder lands.
                 focusTile(singleRow ? lastFocused : lastFocused % COLUMNS);
                 return true;
             }
-            int firstButton = btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
+            int firstButton = btnInputs != null && btnInputs.getVisibility() == View.VISIBLE ? R.id.btnInputs : firstTopButton().getId();
             int leftButton = rtlMenuBar ? R.id.btnSettings : firstButton;
             int rightButton = rtlMenuBar ? firstButton : R.id.btnSettings;
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) return v.getId() == leftButton;
             return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == rightButton;
         };
-        btnInputs.setOnKeyListener(pillKeys);
-        btnWifi.setOnKeyListener(pillKeys);
-        btnVpn.setOnKeyListener(pillKeys);
-        btnSettings.setOnKeyListener(pillKeys);
-        btnReorder.setOnKeyListener(pillKeys);
-        btnLibraryTop.setOnKeyListener(pillKeys);
+        if (btnInputs != null) btnInputs.setOnKeyListener(pillKeys);
+        if (btnWifi != null) btnWifi.setOnKeyListener(pillKeys);
+        if (btnVpn != null) btnVpn.setOnKeyListener(pillKeys);
+        if (btnSettings != null) btnSettings.setOnKeyListener(pillKeys);
+        if (btnReorder != null) btnReorder.setOnKeyListener(pillKeys);
+        if (btnLibraryTop != null) btnLibraryTop.setOnKeyListener(pillKeys);
         for (View button : topAppButtons) button.setOnKeyListener(pillKeys);
         if (advancedEffects) {
-            List<View> pills = new ArrayList<>(Arrays.asList(btnInputs, btnWifi, btnVpn, btnReorder, btnLibraryTop, btnSettings));
+            List<View> pills = new ArrayList<>(Arrays.asList(btnInputs, btnVpn, btnReorder, btnLibraryTop));
             pills.addAll(topAppButtons);
             for (View button : pills) {
+                if (button == null) continue;
                 button.setOnFocusChangeListener((view, focused) -> view.animate()
                         .scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f)
                         .setDuration(reducedMotion ? Motion.REDUCED_MS : 160).start());
@@ -973,6 +963,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         if (openLiveTvAfterBoot()) return;
         updateGreeting();
+        startSystemMonitorPill();
         updateRace();
         // The network and Inputs pills keep their state while Home is in the background, and callbacks update them
         // when the network or the inputs change, so this refresh only catches anything missed. Its binder calls
@@ -1169,6 +1160,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (cardPrompt != null) cardPrompt.dismiss();
         if (appLibrary != null) appLibrary.close();
         if (openPopup != null) openPopup.dismiss();
+        stopSystemMonitorPill();
     }
 
     @Override
@@ -1290,7 +1282,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                     return true;
                 default:
                     if (ok || back) {
-                        if (!down) drop();
+                        if (!down) {
+                            drop();
+                            endReorder();
+                        }
                         return true;
                     }
                     return super.dispatchKeyEvent(event);
@@ -2323,11 +2318,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** The first top-bar button after Inputs that is shown, in bar order (top_bar_apps, the network pill, ...); Settings is always there. */
     private View firstTopButton() {
         ViewGroup bar = findViewById(R.id.topButtons);
-        for (int i = 0; i < bar.getChildCount(); i++) {
-            View button = bar.getChildAt(i);
-            if (button != btnInputs && button.getVisibility() == View.VISIBLE) return button;
+        if (bar != null) {
+            for (int i = 0; i < bar.getChildCount(); i++) {
+                View button = bar.getChildAt(i);
+                if (button != null && button.getVisibility() == View.VISIBLE && button.getId() != R.id.btnInputs) return button;
+            }
         }
-        return findViewById(R.id.btnSettings);
+        return btnInputs != null ? btnInputs : findViewById(R.id.btnSettings);
     }
 
     /** top_bar_apps buttons, in bar order. */
@@ -2634,6 +2631,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
             if (!online) {
                 text = getString(R.string.offline);
+                icon = R.drawable.ic_wifi_0;
                 vpn = false;
             } else if (ethernet) {
                 text = getString(R.string.ethernet);
@@ -2644,7 +2642,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
                 WifiInfo info = wm != null ? wm.getConnectionInfo() : null;
                 String ssid = info != null ? info.getSSID() : null;
-                flame = info != null ? Math.max(1, Math.min(4, WifiManager.calculateSignalLevel(info.getRssi(), 5))) : 3;
+                int rssi = info != null ? info.getRssi() : -100;
+                int wifiLevel = 3;
+                if (info != null) {
+                    wifiLevel = Math.max(0, Math.min(4, WifiManager.calculateSignalLevel(rssi, 5)));
+                }
+                flame = Math.max(1, Math.min(4, wifiLevel));
+                switch (wifiLevel) {
+                    case 4: icon = R.drawable.ic_wifi_4; break;
+                    case 3: icon = R.drawable.ic_wifi_3; break;
+                    case 2: icon = R.drawable.ic_wifi_2; break;
+                    case 1: icon = R.drawable.ic_wifi_1; break;
+                    case 0:
+                    default:
+                        icon = R.drawable.ic_wifi_0; break;
+                }
                 if (ssid != null) {
                     ssid = ssid.replace("\"", "").trim();
                     if (!ssid.isEmpty() && !ssid.contains("unknown") && !ssid.equals("0x")) text = ssid;
@@ -2652,36 +2664,30 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             }
         } catch (Exception ignored) {
         }
+        currentWifiSsid = text;
         // With a VPN app configured, a VPN that is down matters too: show a red "VPN off" capsule then.
         boolean vpnDown = !vpn && online && !vpnApp.isEmpty();
         if (vpnPill) updateVpnPill(vpn);
         if ((vpn || vpnDown) && !vpnPill) {
-            // Network name, then the green lock-and-VPN (or red "VPN off") capsule drawn in place of the word.
             String badge = getString(vpn ? R.string.vpn : R.string.vpn_off);
             VpnBadge span = new VpnBadge(vpn ? getDrawable(R.drawable.ic_lock) : null, density);
-            // The pill has a maximum width and ellipsizes at the end, which would cut the badge off after
-            // a long network name, so shorten the name to whatever room the badge leaves. The Wi-Fi icon and its
-            // gap are counted by hand: until the pill has a resolved layout direction (the first call, from
-            // onResume, runs before that) getTotalPaddingStart/End leave the compound drawables out, which
-            // left the name about 31dp too much room and the badge cut off.
             TextPaint paint = btnWifi.getPaint();
             Drawable[] compound = btnWifi.getCompoundDrawablesRelative();
             int iconRoom = compound[0] != null ? compound[0].getIntrinsicWidth() + btnWifi.getCompoundDrawablePadding() : 0;
             float room = btnWifi.getMaxWidth() - btnWifi.getPaddingStart() - btnWifi.getPaddingEnd() - iconRoom
                     - span.getSize(paint, badge, 0, badge.length(), null) - paint.measureText(" ") - 2 * density;
             String name = TextUtils.ellipsize(text, paint, Math.max(0, room), TextUtils.TruncateAt.END).toString();
-            // A long badge ("VPN отключён") can leave room for a stub like "MT…", which says nothing and, after
-            // rounding, can push the badge itself out of the pill. Show the badge alone then. On Ethernet the
-            // icon already names the link, and "Ethernet" cut to "Ethe…" or not depended on the font size (#961),
-            // so Ethernet always shows the icon and the badge alone.
-            // The space stays even then: a line holding only the span gets no font metrics and collapses.
             boolean stub = name.length() < text.length() && name.length() < 5;
             text = stub || icon == R.drawable.ic_ethernet ? "" : name;
             SpannableString label = new SpannableString(text + " " + badge);
             label.setSpan(span, text.length() + 1, label.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            if (!TextUtils.equals(btnWifi.getText(), label)) btnWifi.setText(label);
-        } else if (!TextUtils.equals(btnWifi.getText(), text)) {
+            currentWifiSsid = label.toString();
+        }
+        btnWifi.setContentDescription(text);
+        if (btnWifi.hasFocus() || btnWifi.isHovered()) {
             btnWifi.setText(text);
+        } else {
+            btnWifi.setText("");
         }
         if (wifiIconOnly) {
             btnWifi.setContentDescription(btnWifi.getText());
@@ -2847,25 +2853,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return SystemSettings.intent(this, standardAction);
     }
 
-    /** Hides the Inputs pill when it would have nothing to list: streaming boxes have no HDMI-in, AV or tuner. */
+    /** System monitor pill remains visible on top bar. */
     private void updateInputsButton() {
-        if (!showInputsPill) {
-            btnInputs.setVisibility(View.GONE);
-            return;
-        }
-        boolean any = liveTvIntent() != null || !sourcePanelService.isEmpty()
-                || (coocaaSources && !CoocaaSources.list(this).isEmpty());
-        TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
-        if (!any && tim != null) {
-            for (TvInputInfo info : tim.getTvInputList()) {
-                // Inputs hidden in Settings > Inputs are left out of the menu, so they don't count here either.
-                if (info.isPassthroughInput() && !info.isHidden(this)) {
-                    any = true;
-                    break;
-                }
-            }
-        }
-        btnInputs.setVisibility(any ? View.VISIBLE : View.GONE);
+        if (btnInputs != null) btnInputs.setVisibility(View.VISIBLE);
     }
 
     /** boot_to_live_tv, or the Open on start app: the first time Home comes up after the TV starts, open that app
@@ -3198,6 +3188,120 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         folded.add(view);
     }
 
+    private void setupExpandablePill(TextView pill, java.util.function.Supplier<String> expandedTextSupplier) {
+        if (pill == null) return;
+        pill.setOnFocusChangeListener((v, hasFocus) -> {
+            expandPill(pill, hasFocus ? expandedTextSupplier.get() : "", hasFocus);
+            pill.animate()
+                    .scaleX(hasFocus ? 1.05f : 1.0f)
+                    .scaleY(hasFocus ? 1.05f : 1.0f)
+                    .setDuration(160)
+                    .start();
+        });
+        pill.setOnHoverListener((v, event) -> {
+            int action = event.getAction();
+            if (action == MotionEvent.ACTION_HOVER_ENTER) {
+                expandPill(pill, expandedTextSupplier.get(), true);
+            } else if (action == MotionEvent.ACTION_HOVER_EXIT) {
+                if (!pill.hasFocus()) {
+                    expandPill(pill, "", false);
+                }
+            }
+            return false;
+        });
+    }
+
+    private void expandPill(TextView pill, String expandedText, boolean expand) {
+        if (pill == null) return;
+        ViewGroup parent = (ViewGroup) pill.getParent();
+        if (parent != null) {
+            AutoTransition transition = new AutoTransition();
+            transition.setDuration(200);
+            transition.setInterpolator(new DecelerateInterpolator());
+            TransitionManager.beginDelayedTransition(parent, transition);
+        }
+        ViewGroup.LayoutParams lp = pill.getLayoutParams();
+        if (expand) {
+            pill.setText(expandedText);
+            lp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+            int padStart = Math.round(14 * density);
+            int padEnd = Math.round(18 * density);
+            pill.setPaddingRelative(padStart, 0, padEnd, 0);
+            pill.setCompoundDrawablePadding(Math.round(8 * density));
+        } else {
+            pill.setText("");
+            lp.width = Math.round(42 * density);
+            int pad = Math.round(10 * density);
+            pill.setPaddingRelative(pad, 0, pad, 0);
+            pill.setCompoundDrawablePadding(0);
+        }
+        pill.setLayoutParams(lp);
+    }
+
+    private void startSystemMonitorPill() {
+        if (btnInputs == null) return;
+        btnInputs.setVisibility(View.VISIBLE);
+        if (sysMonitorRunnable != null) sysMonitorHandler.removeCallbacks(sysMonitorRunnable);
+        sysMonitorRunnable = new Runnable() {
+            @Override
+            public void run() {
+                updateSystemMonitorPill(true);
+                sysMonitorHandler.postDelayed(this, 3000);
+            }
+        };
+        updateSystemMonitorPill(false);
+        sysMonitorHandler.postDelayed(sysMonitorRunnable, 3000);
+    }
+
+    private void stopSystemMonitorPill() {
+        if (sysMonitorRunnable != null) {
+            sysMonitorHandler.removeCallbacks(sysMonitorRunnable);
+            sysMonitorRunnable = null;
+        }
+    }
+
+    private void cycleNextMetric() {
+        if (sysMonitorRunnable != null) sysMonitorHandler.removeCallbacks(sysMonitorRunnable);
+        updateSystemMonitorPill(true);
+        if (sysMonitorRunnable != null) sysMonitorHandler.postDelayed(sysMonitorRunnable, 3000);
+    }
+
+    private void updateSystemMonitorPill(boolean advance) {
+        if (btnInputs == null) return;
+
+        if (advance) {
+            sysMonitorMode = (sysMonitorMode + 1) % 3;
+        }
+
+        final String text;
+        final int iconRes;
+
+        switch (sysMonitorMode) {
+            case 0: // RAM
+                SystemMetrics.RamInfo ram = SystemMetrics.getRamInfo(this);
+                text = ram.pillText;
+                iconRes = R.drawable.ic_ram;
+                break;
+            case 1: // Storage
+                SystemMetrics.StorageInfo storage = SystemMetrics.getStorageInfo();
+                text = storage.pillText;
+                iconRes = R.drawable.ic_storage;
+                break;
+            case 2: // CPU
+            default:
+                SystemMetrics.CpuInfo cpu = SystemMetrics.getCpuInfo();
+                text = cpu.pillText;
+                iconRes = R.drawable.ic_cpu;
+                break;
+        }
+
+        btnInputs.animate().alpha(0.4f).setDuration(120).withEndAction(() -> {
+            btnInputs.setText(text);
+            btnInputs.setCompoundDrawablesRelativeWithIntrinsicBounds(iconRes, 0, 0, 0);
+            btnInputs.animate().alpha(1.0f).setDuration(140).start();
+        }).start();
+    }
+
     private PopupWindow glassPopup(View panel, int width) {
         final PopupWindow popup = new PopupWindow(panel, width, ViewGroup.LayoutParams.WRAP_CONTENT, true);
         popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));   // needed for Back to dismiss
@@ -3334,26 +3438,41 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);
         LinearLayout rows = panel.findViewById(R.id.rows);
         PopupWindow popup = glassPopup(panel, (int) (200 * density));
-        if (dockRow && position < adapter.movableCount()) {
-            boolean inDock = position < COLUMNS;
-            addSettingsMenuRow(rows, popup, inDock ? R.string.tile_replace_in_dock : R.string.tile_add_to_dock,
-                    () -> startDockEditFor(key, inDock));
-        }
-        if (position < adapter.movableCount()) addSettingsMenuRow(rows, popup, R.string.tile_move, () -> {
-            if (!beginReorder()) return;
-            int at = adapter.positionOf(key);   // beginReorder can rebuild the tiles
-            if (at < 0) return;
-            focusTile(at);
-            pickUp(at);
-            Toast.makeText(this, R.string.reorder_hint, Toast.LENGTH_LONG).show();
-        });
-        if (appLibraryEnabled) addSettingsMenuRow(rows, popup, R.string.library_remove_shortcut, () -> {
-            if (LibraryApps.save(this, pkg, false)) reloadApps(false);
-            else Toast.makeText(this, R.string.library_save_failed, Toast.LENGTH_LONG).show();
-        });
-        // Some firmware has no App info page at all; a row that only toasts "can't open" helps nobody.
+        // 1. App info
         Intent info = SystemSettings.appInfo(this, pkg);
-        if (info != null) addSettingsMenuRow(rows, popup, R.string.library_app_info, () -> open(info));
+        if (info == null) {
+            info = new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + pkg));
+        }
+        Intent finalInfo = info;
+        addSettingsMenuRow(rows, popup, R.string.library_app_info, () -> open(finalInfo));
+
+        // 2. Move
+        if (position < adapter.movableCount()) {
+            addSettingsMenuRow(rows, popup, R.string.tile_move, () -> {
+                if (!beginReorder()) return;
+                int at = adapter.positionOf(key);   // beginReorder can rebuild the tiles
+                if (at < 0) return;
+                focusTile(at);
+                pickUp(at);
+                Toast.makeText(this, R.string.reorder_hint, Toast.LENGTH_LONG).show();
+            });
+        }
+
+        // 3. Uninstall
+        addSettingsMenuRow(rows, popup, R.string.tile_uninstall, () -> {
+            Intent uninstall = new Intent(Intent.ACTION_DELETE, Uri.parse("package:" + pkg));
+            uninstall.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                startActivity(uninstall);
+            } catch (ActivityNotFoundException e) {
+                Intent alt = new Intent(Intent.ACTION_UNINSTALL_PACKAGE, Uri.parse("package:" + pkg));
+                alt.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                try {
+                    startActivity(alt);
+                } catch (Exception ignored) {
+                }
+            }
+        });
         panel.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED);
         popup.setWidth(Math.max((int) (200 * density), panel.getMeasuredWidth()));
         // Dock tiles sit near the bottom of the screen: open the menu above the tile when it would not fit below.

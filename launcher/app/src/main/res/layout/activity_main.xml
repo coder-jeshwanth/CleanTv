@@ -325,18 +325,20 @@
                 <TextView
                     android:id="@+id/btnInputs"
                     style="@style/TopButton"
-                    android:text="@string/inputs"
-                    android:drawableStart="@drawable/ic_input"
+                    android:minWidth="175dp"
+                    android:gravity="center"
+                    android:text="RAM: ..."
+                    android:drawableStart="@drawable/ic_ram"
+                    android:nextFocusRight="@+id/btnWifi"
                     android:nextFocusDown="@+id/grid" />
 
                 <TextView
                     android:id="@+id/btnWifi"
-                    style="@style/TopButton"
-                    android:maxWidth="180dp"
-                    android:singleLine="true"
-                    android:ellipsize="end"
-                    android:text="@string/wifi"
-                    android:drawableStart="@drawable/ic_wifi"
+                    style="@style/TopButtonIcon"
+                    android:contentDescription="@string/wifi"
+                    android:drawableStart="@drawable/ic_wifi_4"
+                    android:nextFocusLeft="@+id/btnInputs"
+                    android:nextFocusRight="@+id/btnSettings"
                     android:nextFocusDown="@+id/grid" />
 
                 <TextView
@@ -350,6 +352,7 @@
                 <TextView
                     android:id="@+id/btnReorder"
                     style="@style/TopButtonIcon"
+                    android:visibility="gone"
                     android:contentDescription="@string/reorder"
                     android:drawableStart="@drawable/ic_swap_vert"
                     android:nextFocusDown="@+id/grid" />
@@ -364,10 +367,12 @@
 
                 <TextView
                     android:id="@+id/btnSettings"
-                    style="@style/TopButton"
-                    android:text="@string/settings"
+                    style="@style/TopButtonIcon"
+                    android:contentDescription="@string/settings"
                     android:drawableStart="@drawable/ic_settings"
+                    android:nextFocusLeft="@+id/btnWifi"
                     android:nextFocusDown="@+id/grid" />
+
             </LinearLayout>
         </RelativeLayout>
 
