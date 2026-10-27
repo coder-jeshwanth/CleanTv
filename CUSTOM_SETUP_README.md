@@ -54,7 +54,7 @@ Everything needed for your TV to function flawlessly remains active:
 
 ### 4. Apple TV Style Custom Launcher (`com.gathin.tvhome`)
 - **Pitch Black Background** (`#000000`) designed for OLED and high-contrast TVs.
-- **5-Slot Dock**: YouTube, Netflix, Prime Video, JioHotstar, Sony LIV resting inside a translucent rounded glass band at the bottom.
+- **5-Slot Dock**: YouTube, Netflix, Prime Video, JioHotstar, Sony LIV floating cleanly on the background at the bottom.
 - **Apple TV Focus Effects**:
   - Large type title above dock with dynamic ambient color glow sampled from the focused app's banner (e.g. red for YouTube & Netflix, blue for Prime Video, cyan/violet for JioHotstar).
   - Single fluid translucent glass highlight bouncing between tiles with spring physics.
